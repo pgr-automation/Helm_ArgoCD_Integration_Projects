@@ -180,7 +180,7 @@ In GitOps, the desired state of your application and environment is stored in a 
 
 The repository might look like this:
 
-```grahpqa
+```grahpql
 myapp-gitops/
 ├── base/
 │   ├── values.yaml               # Default values for all environments
