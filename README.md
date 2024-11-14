@@ -195,3 +195,193 @@ myapp-gitops/
     └── production-myapp.yaml      # Argo CD Application manifest
 ```
 
+#### 2. Set Up the Argo CD Application
+
+Argo CD can deploy Helm charts directly by referencing your Git repository. You can configure an Argo CD Application manifest to point to your Helm chart in this repository.
+
+Here’s an example Argo CD Application manifest for deploying the Helm chart to production:
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: production-myapp
+  namespace: argocd         # Typically, Argo CD runs in its own namespace
+spec:
+  project: default          # Use an existing Argo CD project or create a new one
+  source:
+    repoURL: 'https://github.com/yourorg/myapp-gitops'
+    targetRevision: HEAD    # Or a specific branch, tag, or commit hash
+    path: base              # Path to the Helm chart or configurations
+    helm:
+      valueFiles:           # List of value files to use for this deployment
+        - values.yaml       # Base values
+        - overlays/production/values-production.yaml # Environment-specific values
+  destination:
+    server: https://kubernetes.default.svc # Kubernetes API endpoint
+    namespace: myapp-prod    # Namespace to deploy the app in
+  syncPolicy:
+    automated:
+      prune: true           # Automatically remove resources no longer in Git
+      selfHeal: true        # Automatically apply changes in Git
+    syncOptions:
+      - CreateNamespace=true # Ensure the namespace is created if it doesn't exist
+```
+
+#### 3. Customize with Helm Parameters in Argo CD (If required)
+
+Argo CD supports setting Helm values directly in the Application manifest. For example, you could override parameters without changing the values.yaml file:
+```yaml
+source:
+  helm:
+    parameters:
+      - name: replicaCount
+        value: "5"
+      - name: image.tag
+        value: "v1.2.3"
+```
+This is useful if you want to apply quick, environment-specific overrides directly in Argo CD without modifying Git files.
+
+#### 4. Commit and Push Changes
+
+Push your Helm chart and Application manifest to your Git repository. Argo CD will automatically detect changes and apply them based on its sync policy.
+
+#### 5. Set Up Sync Policies in Argo CD
+
+In Argo CD:
+
+    - Manual Sync lets you control when changes are applied by requiring manual approval.
+    - Automatic Sync (used above) ensures that Argo CD continuously monitors the Git repository and syncs any changes to the live environment.
+
+You can view your Argo CD application in the Argo CD dashboard to track deployments, monitor sync status, and review logs for troubleshooting.
+
+#### 6. Deploy Using Argo CD CLI or UI
+
+With your setup in place, you can trigger deployments manually or let Argo CD manage them automatically. To trigger a manual sync:
+```bash
+argocd app sync production-myapp
+```
+
+#### 7 1. Update the Version in Git
+
+When a new release is available for your application, you’ll need to update the Helm values or chart version in your Git repository.
+Example 1: Update the Image Tag
+
+If the new release is a change in the Docker image version, update the image.tag value in your environment-specific values file (e.g., values-production.yaml):
+
+```yaml
+# overlays/production/values-production.yaml
+image:
+  repository: "myrepo/myapp"
+  tag: "v2.0.0"  # Update to the new version here
+```
+#### 7. 2: Update the Helm Chart Version
+
+If you’re using a Helm chart from a chart repository (like an official chart or a custom Helm repository), update the source section in your Argo CD Application manifest to specify the new chart version.
+```yaml
+# applications/production-myapp.yaml
+spec:
+  source:
+    chart: myapp-chart
+    targetRevision: "2.0.0"  # Specify the new Helm chart version here
+    helm:
+      valueFiles:
+        - values.yaml
+        - overlays/production/values-production.yaml
+```
+- Commit and Push Changes to Git
+
+## Jenkins CICD
+
+```groovy
+pipeline {
+    agent any
+
+    environment {
+        // Set up environment variables
+        GIT_REPO = 'https://github.com/yourorg/myapp-gitops.git' // Your GitOps repo
+        GIT_BRANCH = 'main'                                      // Git branch to push updates
+        CHART_PATH = 'base/'                                     // Path to the Helm chart in the Git repo
+        VALUES_FILE = 'overlays/production/values-production.yaml'
+        IMAGE_TAG = ''                                           // This will be populated dynamically
+        GIT_CREDENTIALS_ID = 'your-git-credentials-id'           // Jenkins credential ID for Git
+    }
+
+    stages {
+        stage('Build & Tag Docker Image') {
+            steps {
+                script {
+                    // Build and tag the Docker image
+                    IMAGE_TAG = "v${env.BUILD_ID}" // Use a unique tag (e.g., build number)
+                    docker.build("myrepo/myapp:${IMAGE_TAG}").push()
+                }
+            }
+        }
+
+        stage('Update Helm Chart Values') {
+            steps {
+                script {
+                    // Clone the GitOps repository
+                    checkout([$class: 'GitSCM', 
+                        branches: [[name: GIT_BRANCH]],
+                        userRemoteConfigs: [[url: GIT_REPO, credentialsId: GIT_CREDENTIALS_ID]]
+                    ])
+
+                    // Update the image tag in the values file
+                    def valuesFile = readYaml file: VALUES_FILE
+                    valuesFile.image.tag = IMAGE_TAG
+                    writeYaml file: VALUES_FILE, data: valuesFile
+
+                    // Commit and push changes
+                    sh """
+                    git config user.name "jenkins"
+                    git config user.email "jenkins@example.com"
+                    git add ${VALUES_FILE}
+                    git commit -m "Update image tag to ${IMAGE_TAG}"
+                    git push origin ${GIT_BRANCH}
+                    """
+                }
+            }
+        }
+
+        stage('Trigger Argo CD Sync') {
+            steps {
+                script {
+                    // Optionally trigger Argo CD sync via CLI or API (if Argo CD doesn't have automatic sync enabled)
+                    // This step requires the Argo CD CLI and an API token
+                    withCredentials([string(credentialsId: 'argocd-token', variable: 'ARGOCD_TOKEN')]) {
+                        sh """
+                        argocd app sync production-myapp \
+                            --grpc-web \
+                            --server argocd-server.yourdomain.com \
+                            --auth-token $ARGOCD_TOKEN
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Verify Deployment') {
+            steps {
+                script {
+                    // Optional: Verify the new image is running
+                    sh "kubectl rollout status deployment/myapp-deployment -n myapp-prod"
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            // Clean up the workspace
+            cleanWs()
+        }
+        success {
+            echo "Deployment to production successful!"
+        }
+        failure {
+            echo "Deployment failed. Please check the logs."
+        }
+    }
+}
+```
