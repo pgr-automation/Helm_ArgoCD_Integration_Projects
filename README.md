@@ -291,7 +291,7 @@ spec:
 ```
 - Commit and Push Changes to Git
 
-## Jenkins CICD
+## Jenkins CICD (make sure Pipeline Utility Steps plugin is installed)
 
 ```groovy
 pipeline {
